@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+
+# Local operational context for Codex/ChatGPT Projects. Never publish customer,
+# employee, device, network, or deployment-specific information.
+.project-context/
