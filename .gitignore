@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .venv/
+output/
 
 # Local operational context for Codex/ChatGPT Projects. Never publish customer,
 # employee, device, network, or deployment-specific information.
