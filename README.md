@@ -34,6 +34,31 @@ This app runs both listeners. Devices push attendance events the moment they hap
 
 ## Setup
 
+### Windows shop installer
+
+The `Windows Installer` GitHub Actions workflow produces an unsigned
+`FactorPunch-Sync-Setup.exe` for supervised Windows 10/11 x64 installations.
+It bundles the application runtime, frontend, MariaDB, and service wrapper;
+the shop computer does not need Python, Node.js, Git, Docker, or a database
+server installed beforehand.
+
+Run the installer as Administrator. The first-run console asks for the
+restaurant name, administrator username, and a temporary password, then:
+
+- creates private MariaDB and FactorPunch Sync Windows services;
+- opens TCP port 8000 on the Private firewall profile only;
+- creates the initial administrator and requires a password change at login;
+- schedules a daily database backup at 02:00; and
+- adds Start-menu shortcuts for the dashboard, logs, backup, and repair.
+
+The current installer is intentionally **unsigned**, so Windows SmartScreen
+may show an unknown-publisher warning. Verify the accompanying SHA-256 file
+before running it. Code signing is required before unattended customer rollout.
+
+Database files and backups are kept under
+`C:\ProgramData\FactorPunch Sync`. Uninstalling the application deliberately
+does not remove those records.
+
 ### Prerequisites
 
 - Python 3.11+

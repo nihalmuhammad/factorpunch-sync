@@ -1,0 +1,91 @@
+name: Windows Installer
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  PYTHON_EMBED_URL: https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip
+  MARIADB_URL: https://archive.mariadb.org/mariadb-11.4.8/winx64-packages/mariadb-11.4.8-winx64.zip
+  MARIADB_SHA256: ed86e93157af46317bb49161451c2ec258498a6fa8e68ca821ef1d780d855e6b
+  NSSM_URL: https://nssm.cc/ci/nssm-2.24-101-g897c7ad.zip
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.9"
+          cache: pip
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Build frontend
+        shell: pwsh
+        run: |
+          npm ci --prefix frontend
+          npm run build --prefix frontend
+
+      - name: Assemble offline application runtime
+        shell: pwsh
+        run: |
+          $stage = 'installer/stage'
+          New-Item -ItemType Directory -Force -Path "$stage/app/runtime/Lib/site-packages", "$stage/tools" | Out-Null
+          Invoke-WebRequest $env:PYTHON_EMBED_URL -OutFile python.zip
+          Expand-Archive python.zip "$stage/app/runtime"
+          (Get-Content "$stage/app/runtime/python311._pth") -replace '#import site', "Lib\site-packages`nimport site" | Set-Content "$stage/app/runtime/python311._pth" -Encoding ASCII
+          uv export --frozen --no-dev --no-emit-project --output-file requirements-windows.txt
+          python -m pip install --disable-pip-version-check --requirement requirements-windows.txt --target "$stage/app/runtime/Lib/site-packages"
+          Copy-Item app, frontend, scripts -Destination "$stage/app" -Recurse
+          Copy-Item run.py, pyproject.toml, LICENSE -Destination "$stage/app"
+          Remove-Item "$stage/app/frontend/node_modules" -Recurse -Force -ErrorAction SilentlyContinue
+
+      - name: Bundle MariaDB and service wrapper
+        shell: pwsh
+        run: |
+          Invoke-WebRequest $env:MARIADB_URL -OutFile mariadb.zip
+          if ((Get-FileHash mariadb.zip -Algorithm SHA256).Hash.ToLower() -ne $env:MARIADB_SHA256) { throw 'MariaDB checksum mismatch' }
+          Expand-Archive mariadb.zip mariadb-unpacked
+          $mariaRoot = Get-ChildItem mariadb-unpacked -Directory | Select-Object -First 1
+          Copy-Item $mariaRoot.FullName installer/stage/mariadb -Recurse
+          Invoke-WebRequest $env:NSSM_URL -OutFile nssm.zip
+          Expand-Archive nssm.zip nssm-unpacked
+          $nssm = Get-ChildItem nssm-unpacked -Recurse -Filter nssm.exe | Where-Object FullName -Match 'win64' | Select-Object -First 1
+          Copy-Item $nssm.FullName installer/stage/tools/nssm.exe
+
+      - name: Build unsigned installer
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' installer/windows/FactorPunchSync.iss
+          Get-FileHash output/windows/FactorPunch-Sync-Setup.exe -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  FactorPunch-Sync-Setup.exe" } | Set-Content output/windows/FactorPunch-Sync-Setup.exe.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FactorPunch-Sync-Windows-x64-unsigned
+          path: |
+            output/windows/FactorPunch-Sync-Setup.exe
+            output/windows/FactorPunch-Sync-Setup.exe.sha256
+
+      - name: Publish tagged release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh release view $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY 2>$null `
+            || gh release create $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --generate-notes
+          gh release upload $env:GITHUB_REF_NAME output/windows/FactorPunch-Sync-Setup.exe output/windows/FactorPunch-Sync-Setup.exe.sha256 --repo $env:GITHUB_REPOSITORY --clobber
