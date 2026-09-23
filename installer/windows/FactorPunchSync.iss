@@ -41,6 +41,7 @@ Name: "{group}\Logs"; Filename: "{commonappdata}\FactorPunch Sync\Logs"
 Name: "{group}\Uninstall FactorPunch Sync"; Filename: "{uninstallexe}"
 
 [Run]
+Filename: "{app}\tools\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installing Windows runtime prerequisites..."; Flags: waituntilterminated
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\installer\Configure.ps1"" -InstallDir ""{app}"""; StatusMsg: "Configuring FactorPunch Sync..."; Flags: waituntilterminated
 Filename: "http://localhost:8000"; Description: "Open FactorPunch Sync"; Flags: postinstall shellexec skipifsilent nowait
 

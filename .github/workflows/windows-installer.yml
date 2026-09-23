@@ -13,6 +13,7 @@ env:
   MARIADB_URL: https://archive.mariadb.org/mariadb-11.4.8/winx64-packages/mariadb-11.4.8-winx64.zip
   MARIADB_SHA256: ed86e93157af46317bb49161451c2ec258498a6fa8e68ca821ef1d780d855e6b
   NSSM_URL: https://nssm.cc/ci/nssm-2.24-101-g897c7ad.zip
+  VC_REDIST_URL: https://aka.ms/vc14/vc_redist.x64.exe
 
 jobs:
   build:
@@ -52,6 +53,9 @@ jobs:
           Copy-Item app, frontend, scripts -Destination "$stage/app" -Recurse
           Copy-Item run.py, pyproject.toml, LICENSE -Destination "$stage/app"
           Remove-Item "$stage/app/frontend/node_modules" -Recurse -Force -ErrorAction SilentlyContinue
+          & "$stage/app/runtime/python.exe" -c "import fastapi, pymysql, reportlab, sqlalchemy, uvicorn; print('Embedded runtime OK')"
+          [scriptblock]::Create((Get-Content installer/windows/Configure.ps1 -Raw)) | Out-Null
+          [scriptblock]::Create((Get-Content installer/windows/Backup.ps1 -Raw)) | Out-Null
 
       - name: Bundle MariaDB and service wrapper
         shell: pwsh
@@ -65,6 +69,9 @@ jobs:
           Expand-Archive nssm.zip nssm-unpacked
           $nssm = Get-ChildItem nssm-unpacked -Recurse -Filter nssm.exe | Where-Object FullName -Match 'win64' | Select-Object -First 1
           Copy-Item $nssm.FullName installer/stage/tools/nssm.exe
+          Invoke-WebRequest $env:VC_REDIST_URL -OutFile installer/stage/tools/vc_redist.x64.exe
+          $signature = Get-AuthenticodeSignature installer/stage/tools/vc_redist.x64.exe
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft Corporation') { throw 'Microsoft Visual C++ Redistributable signature verification failed' }
 
       - name: Build unsigned installer
         shell: pwsh
