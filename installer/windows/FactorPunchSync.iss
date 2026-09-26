@@ -1,5 +1,5 @@
 #define AppName "FactorPunch Sync"
-#define AppVersion "0.3.5"
+#define AppVersion "0.3.6"
 #define AppPublisher "FactorPunch"
 #define AppExeName "FactorPunch-Sync-Setup.exe"
 
@@ -21,6 +21,7 @@ WizardStyle=modern
 DisableProgramGroupPage=yes
 UninstallDisplayIcon={app}\app\frontend\public\favicon.svg
 SetupLogging=yes
+RestartIfNeededByRun=no
 
 [Files]
 Source: "..\stage\app\*"; DestDir: "{app}\app"; Flags: ignoreversion recursesubdirs createallsubdirs

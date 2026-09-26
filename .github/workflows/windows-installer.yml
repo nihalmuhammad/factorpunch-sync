@@ -47,12 +47,15 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$stage/app/runtime/Lib/site-packages", "$stage/tools" | Out-Null
           Invoke-WebRequest $env:PYTHON_EMBED_URL -OutFile python.zip
           Expand-Archive python.zip "$stage/app/runtime"
-          (Get-Content "$stage/app/runtime/python311._pth") -replace '#import site', "Lib\site-packages`nimport site" | Set-Content "$stage/app/runtime/python311._pth" -Encoding ASCII
+          (Get-Content "$stage/app/runtime/python311._pth") -replace '#import site', "Lib\site-packages`n..`nimport site" | Set-Content "$stage/app/runtime/python311._pth" -Encoding ASCII
           uv export --frozen --no-dev --no-emit-project --output-file requirements-windows.txt
           python -m pip install --disable-pip-version-check --requirement requirements-windows.txt --target "$stage/app/runtime/Lib/site-packages"
           Copy-Item app, frontend, scripts -Destination "$stage/app" -Recurse
           Copy-Item run.py, pyproject.toml, LICENSE -Destination "$stage/app"
           Remove-Item "$stage/app/frontend/node_modules" -Recurse -Force -ErrorAction SilentlyContinue
+          Push-Location "$stage/app"
+          try { & "runtime/python.exe" -c "import app; print('Application path OK')" }
+          finally { Pop-Location }
           & "$stage/app/runtime/python.exe" -c "import fastapi, pymysql, reportlab, sqlalchemy, uvicorn; print('Embedded runtime OK')"
           [scriptblock]::Create((Get-Content installer/windows/Configure.ps1 -Raw)) | Out-Null
           [scriptblock]::Create((Get-Content installer/windows/Backup.ps1 -Raw)) | Out-Null

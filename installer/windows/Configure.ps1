@@ -132,16 +132,31 @@ DB_ODBC_DRIVER=ODBC Driver 17 for SQL Server
     [IO.File]::WriteAllText($envFile, $environmentText, [Text.UTF8Encoding]::new($false))
 }
 
+# Repairs and upgrades must also wait for the existing database service.  The
+# application service has an SCM dependency below, while this active probe
+# ensures MariaDB is accepting TCP connections before first startup.
+$databaseServiceObject = Get-Service -Name $databaseService -ErrorAction SilentlyContinue
+if (-not $databaseServiceObject) { throw 'The FactorPunch MariaDB service is missing. Reinstall FactorPunch Sync.' }
+Set-Service -Name $databaseService -StartupType Automatic
+if ($databaseServiceObject.Status -ne 'Running') { Start-Service -Name $databaseService }
+$databaseDeadline = (Get-Date).AddSeconds(60)
+do {
+    Start-Sleep -Seconds 2
+    $databaseReady = (Test-NetConnection -ComputerName 127.0.0.1 -Port $databasePort -WarningAction SilentlyContinue).TcpTestSucceeded
+} until ($databaseReady -or (Get-Date) -gt $databaseDeadline)
+if (-not $databaseReady) { throw 'MariaDB did not become ready on port 3307 within 60 seconds.' }
+
 if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
     Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
     (Get-Service -Name $serviceName).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
     Invoke-Nssm remove $serviceName confirm
 }
 $python = Join-Path $appDir 'runtime\python.exe'
-$runScript = Join-Path $appDir 'run.py'
 $stdoutLog = Join-Path $logDir 'stdout.log'
 $stderrLog = Join-Path $logDir 'stderr.log'
-Invoke-Nssm install $serviceName $python $runScript
+# AppDirectory supplies the application path.  Keep AppParameters relative so
+# NSSM cannot split the Program Files path at its spaces.
+Invoke-Nssm install $serviceName $python 'run.py'
 Invoke-Nssm set $serviceName AppDirectory $appDir
 Invoke-Nssm set $serviceName AppStdout $stdoutLog
 Invoke-Nssm set $serviceName AppStderr $stderrLog
@@ -150,6 +165,8 @@ Invoke-Nssm set $serviceName AppRotateBytes 10485760
 Invoke-Nssm set $serviceName AppNoConsole 1
 Invoke-Nssm set $serviceName AppExit Default Exit
 Invoke-Nssm set $serviceName Start SERVICE_AUTO_START
+& sc.exe config $serviceName depend= $databaseService | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'Could not configure the MariaDB service dependency.' }
 
 # Let Windows report a stopped service when Python exits, then use the normal
 # service recovery policy.  NSSM's default rapid-restart throttling reports
@@ -175,8 +192,11 @@ do {
     Start-Sleep -Seconds 2
     $service = Get-Service -Name $serviceName
     if ($service.Status -eq 'Stopped') { break }
-    try { $response = Invoke-WebRequest -UseBasicParsing -Uri "http://localhost:$appPort/login" -TimeoutSec 5 }
-    catch { $response = $_.Exception.Response }
+    $portReady = (Test-NetConnection -ComputerName 127.0.0.1 -Port $appPort -WarningAction SilentlyContinue).TcpTestSucceeded
+    if ($portReady) {
+        try { $response = Invoke-WebRequest -UseBasicParsing -Uri "http://localhost:$appPort/login" -TimeoutSec 5 }
+        catch { $response = $_.Exception.Response }
+    }
 } until ($response -or (Get-Date) -gt $deadline)
 if (-not $response) {
     $details = Get-LogTail $stderrLog
