@@ -37,6 +37,18 @@ _send_lock = threading.Lock()
 _DAY_START_HOURS = 3
 
 MSG_NOT_SET_UP = "Google Drive isn't set up yet. Ask an admin to connect it in Settings."
+MSG_NO_ALLOWED = ("Google Drive sending is switched off: no account is allowed. "
+                  "Set DRIVE_ALLOWED_ACCOUNT in this server's .env file and restart it.")
+
+
+def _allowed_label() -> str:
+    return ", ".join(config.DRIVE_ALLOWED_ACCOUNTS)
+
+
+def _wrong_account_msg(email: Optional[str]) -> str:
+    who = email or "an account Google didn't verify"
+    return (f"Signed in as {who}, but attendance may only go to {_allowed_label()}. "
+            "Ask an admin to reconnect Google Drive with that account.")
 
 
 class DriveConfigUpdate(BaseModel):
@@ -88,6 +100,7 @@ def _clear_pending(row: DriveIntegration) -> None:
 def _serialize(row: DriveIntegration, user: User) -> dict:
     data = {
         "connected": bool(row.refresh_token),
+        "allowed_account": _allowed_label(),
         "folder_name": row.folder_name,
         "today": operational_today().isoformat(),
         "last_send_at": row.last_send_at,
@@ -102,6 +115,7 @@ def _serialize(row: DriveIntegration, user: User) -> dict:
             "client_secret_set": bool(row.client_secret),
             "connected_at": row.connected_at,
             "connected_by": row.connected_by,
+            "connected_email": row.connected_email,
             "pending": _pending(row),
         })
     return data
@@ -138,6 +152,7 @@ def update_config(payload: DriveConfigUpdate, request: Request,
         row.folder_id = None
         row.connected_at = None
         row.connected_by = None
+        row.connected_email = None
     db.commit()
     db.refresh(row)
     if updates:
@@ -152,6 +167,8 @@ def update_config(payload: DriveConfigUpdate, request: Request,
 def start_connect(request: Request, db: Session = Depends(get_db),
                   admin: User = Depends(require_admin)):
     row = _get_or_create(db)
+    if not config.DRIVE_ALLOWED_ACCOUNTS:
+        raise HTTPException(status_code=400, detail=MSG_NO_ALLOWED)
     if not row.client_id or not row.client_secret:
         raise HTTPException(status_code=400,
                             detail="Save the OAuth client ID and secret before connecting.")
@@ -194,7 +211,18 @@ def poll_connect(request: Request, db: Session = Depends(get_db),
         db.commit()
         raise HTTPException(status_code=400,
                             detail="Google did not return a long-lived sign-in. Start again.")
+    email = drive.signed_in_email(tokens)
+    if not config.drive_account_allowed(email):
+        # Hand the grant straight back: a token for the wrong Drive is never kept.
+        with drive.make_client() as client:
+            drive.revoke(client, tokens["refresh_token"])
+        _clear_pending(row)
+        db.commit()
+        audit.record(db, admin.username, "drive_connect", ip=client_ip(request),
+                     detail=f"refused: {email or 'unverified account'} is not an allowed account")
+        raise HTTPException(status_code=403, detail=_wrong_account_msg(email))
     row.refresh_token = tokens["refresh_token"]
+    row.connected_email = email
     row.connected_at = _now()
     row.connected_by = admin.username
     row.folder_id = None
@@ -203,7 +231,7 @@ def poll_connect(request: Request, db: Session = Depends(get_db),
     db.commit()
     db.refresh(row)
     audit.record(db, admin.username, "drive_connect", ip=client_ip(request),
-                 detail="Google Drive signed in")
+                 detail=f"Google Drive signed in as {email}")
     return {**_serialize(row, admin), "status": "connected"}
 
 
@@ -216,6 +244,7 @@ def disconnect(request: Request, db: Session = Depends(get_db),
     row.folder_id = None
     row.connected_at = None
     row.connected_by = None
+    row.connected_email = None
     _clear_pending(row)
     db.commit()
     db.refresh(row)
@@ -242,8 +271,13 @@ def send(request: Request, day: Optional[date] = Query(None),
         raise HTTPException(status_code=409, detail="Another send is in progress. Try again in a minute.")
     try:
         row = _get_or_create(db)
+        if not config.DRIVE_ALLOWED_ACCOUNTS:
+            raise HTTPException(status_code=400, detail=MSG_NO_ALLOWED)
         if not (row.refresh_token and row.client_id and row.client_secret):
             raise HTTPException(status_code=400, detail=MSG_NOT_SET_UP)
+        # The allow-list may have been tightened since this sign-in was made.
+        if not config.drive_account_allowed(row.connected_email):
+            raise HTTPException(status_code=403, detail=_wrong_account_msg(row.connected_email))
 
         content = build_attendance_csv(db, day, day).encode("utf-8")
         try:
@@ -273,7 +307,7 @@ def send(request: Request, day: Optional[date] = Query(None),
         db.refresh(row)
         action = "replaced" if result["replaced"] else "created"
         audit.record(db, user.username, "drive_send", target=filename, ip=ip,
-                     detail=f"{action} in Drive folder '{row.folder_name}'")
+                     detail=f"{action} in {row.connected_email} Drive folder '{row.folder_name}'")
         return {**_serialize(row, user), "replaced": result["replaced"]}
     finally:
         _send_lock.release()

@@ -477,6 +477,7 @@ class DriveIntegration(Base):
     refresh_token = Column(String(1000), nullable=True)
     connected_at = Column(DateTime, nullable=True)
     connected_by = Column(String(150), nullable=True)
+    connected_email = Column(String(320), nullable=True)  # the Google account that approved
     folder_id = Column(String(200), nullable=True)     # created by the app (drive.file scope)
     # An in-progress device-flow sign-in
     pending_device_code = Column(String(500), nullable=True)

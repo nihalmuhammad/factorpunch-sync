@@ -13,6 +13,7 @@ Every exception raised to callers is a :class:`DriveError` whose message is
 written for restaurant staff and never contains a token or client secret.
 """
 
+import base64
 import json
 import logging
 import uuid
@@ -21,7 +22,9 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-SCOPE = "https://www.googleapis.com/auth/drive.file"
+# openid + email let us read which Google account approved the sign-in, so
+# it can be checked against DRIVE_ALLOWED_ACCOUNT before it is kept.
+SCOPE = "openid email https://www.googleapis.com/auth/drive.file"
 DEVICE_CODE_URL = "https://oauth2.googleapis.com/device/code"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 REVOKE_URL = "https://oauth2.googleapis.com/revoke"
@@ -118,6 +121,24 @@ def access_token(client: httpx.Client, client_id: str, client_secret: str,
             raise DriveError(MSG_RECONNECT)
         raise DriveError("Google sign-in service returned an error. Try again in a few minutes.")
     return r.json()["access_token"]
+
+
+def signed_in_email(tokens: dict) -> str | None:
+    """The verified address from the id_token Google returned with the grant.
+
+    The token came straight from Google's token endpoint over TLS in reply to
+    our own request, so (per OpenID Connect) its signature need not be
+    re-checked here. Returns None if Google did not vouch for the address.
+    """
+    raw = tokens.get("id_token") or ""
+    try:
+        payload = raw.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    except (IndexError, ValueError):
+        return None
+    if claims.get("email_verified") not in (True, "true"):
+        return None
+    return (claims.get("email") or "").strip().lower() or None
 
 
 def revoke(client: httpx.Client, refresh_token: str) -> None:

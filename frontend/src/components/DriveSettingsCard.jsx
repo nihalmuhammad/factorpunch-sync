@@ -144,6 +144,14 @@ export default function DriveSettingsCard({ onToast }) {
           </form>
         ) : (
           <>
+            <div className="flex justify-between"><span className="text-gray-500">Allowed account</span>
+              <span className="text-gray-900">{cfg.allowed_account || '—'}</span></div>
+            {!cfg.allowed_account && (
+              <p className="text-xs text-amber-700">
+                Sending is switched off until DRIVE_ALLOWED_ACCOUNT is set in this server's .env file
+                (for example owner@yourrestaurant.com) and the service is restarted.
+              </p>
+            )}
             <div className="flex justify-between"><span className="text-gray-500">OAuth client</span>
               <span className="text-gray-900 font-mono text-xs truncate max-w-[60%]">{cfg.client_id || '—'}</span></div>
             <div className="flex justify-between"><span className="text-gray-500">Folder</span>
@@ -151,6 +159,10 @@ export default function DriveSettingsCard({ onToast }) {
             {cfg.connected && (
               <div className="flex justify-between"><span className="text-gray-500">Connected by</span>
                 <span className="text-gray-900">{cfg.connected_by} · {new Date(cfg.connected_at).toLocaleDateString()}</span></div>
+            )}
+            {cfg.connected && (
+              <div className="flex justify-between"><span className="text-gray-500">Google account</span>
+                <span className="text-gray-900">{cfg.connected_email}</span></div>
             )}
             {cfg.last_send_at && (
               <div className="flex justify-between"><span className="text-gray-500">Last send</span>
@@ -168,7 +180,7 @@ export default function DriveSettingsCard({ onToast }) {
                   On any phone or computer, open{' '}
                   <a href={cfg.pending.verification_url} target="_blank" rel="noreferrer"
                     className="underline font-medium">{cfg.pending.verification_url}</a>{' '}
-                  and enter this code:
+                  and enter this code. Sign in as <strong>{cfg.allowed_account}</strong>; any other account is refused.
                 </p>
                 <p className="mt-2 text-2xl font-mono font-semibold tracking-widest text-blue-900">
                   {cfg.pending.user_code}
@@ -194,7 +206,7 @@ export default function DriveSettingsCard({ onToast }) {
                 className="border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm font-medium px-4 py-2 rounded-lg">
                 Edit
               </button>
-              {hasClient && !cfg.connected && !cfg.pending && (
+              {hasClient && cfg.allowed_account && !cfg.connected && !cfg.pending && (
                 <button onClick={handleConnect} disabled={busy}
                   className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium px-4 py-2 rounded-lg">
                   {busy ? 'Starting…' : 'Connect Google Drive'}

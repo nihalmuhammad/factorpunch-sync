@@ -280,6 +280,23 @@ def valid_timezone(name) -> bool:
 
 DEFAULT_DEVICE_TIMEZONE = _get("DEFAULT_DEVICE_TIMEZONE", "Asia/Dubai")
 
+# The only Google account(s) the "Send to Google Drive" button may upload to.
+# Comma-separated full addresses (owner@example.com) and/or whole Workspace
+# domains (@example.com). Set in .env, deliberately not in the web UI, so an
+# admin login alone can't redirect attendance to a different Drive. Empty
+# means Drive sending is switched off.
+DRIVE_ALLOWED_ACCOUNTS = [
+    item.strip().lower() for item in _get("DRIVE_ALLOWED_ACCOUNT", "").split(",") if item.strip()
+]
+
+
+def drive_account_allowed(email: str) -> bool:
+    email = (email or "").strip().lower()
+    if not email or "@" not in email:
+        return False
+    domain = "@" + email.rsplit("@", 1)[1]
+    return any(email == item or domain == item for item in DRIVE_ALLOWED_ACCOUNTS)
+
 # Unlike the checks in _problems() below, this one raises in *every*
 # environment. Those are deployment-posture questions where a development
 # machine legitimately differs; an unresolvable zone name is simply a typo,
