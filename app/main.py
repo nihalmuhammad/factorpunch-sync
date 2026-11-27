@@ -25,7 +25,7 @@ from app.middleware import (
 )
 from app.migrations import run_migrations
 from app.routers import adms, attendance, audit, auth, devices, employees, users
-from app.routers import hrm_sync
+from app.routers import drive, hrm_sync
 from app.database import SessionLocal
 from app.models import HrmIntegration
 from app.services.bootstrap import seed_first_admin
@@ -178,6 +178,7 @@ app.include_router(devices.router)
 app.include_router(employees.router)
 app.include_router(attendance.router)
 app.include_router(hrm_sync.router)
+app.include_router(drive.router)
 app.include_router(users.router)
 app.include_router(audit.router)
 

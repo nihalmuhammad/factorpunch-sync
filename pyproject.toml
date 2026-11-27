@@ -17,4 +17,5 @@ dependencies = [
     "apscheduler>=3.11.2",
     "argon2-cffi>=25.1.0",
     "reportlab>=5.0.1",
+    "google-auth>=2.30",
 ]

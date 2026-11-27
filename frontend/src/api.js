@@ -54,6 +54,16 @@ export const api = {
     update: (data) => request('PUT', '/hrm-sync', data),
     run: () => request('POST', '/hrm-sync/run'),
   },
+  // Daily attendance CSV to the restaurant's Google shared drive. Any
+  // signed-in user may send; the rest is admin-only on the server.
+  drive: {
+    status: () => request('GET', '/drive'),
+    setFolder: (folder) => request('PUT', '/drive', { folder }),
+    uploadKey: (keyJson) => request('POST', '/drive/key', { key_json: keyJson }),
+    removeKey: () => request('DELETE', '/drive/key'),
+    test: () => request('POST', '/drive/test'),
+    send: (day) => request('POST', `/drive/send${day ? `?day=${encodeURIComponent(day)}` : ''}`),
+  },
   attendance: {
     list: (params = {}) => {
       const q = new URLSearchParams()

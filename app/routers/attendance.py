@@ -67,25 +67,10 @@ def _classify_punches(values, scheduled_start, scheduled_end, has_shift):
     return value, None
 
 
-@router.get("/export")
-def export_attendance(
-    from_date: date = Query(...),
-    to_date: date = Query(...),
-    admin: User = Depends(require_admin),
-    db: Session = Depends(get_db),
-    user_id: Optional[list[str]] = Query(None),
-):
-    """Export shift-aware daily attendance and employee totals as CSV.
-
-    Raw punches are never rewritten. Employees without an assigned schedule
-    use the shop's default rule: one operational day runs 03:00–02:59, the
-    first punch is in, the last is out, and credited time is capped at 13h.
-    """
-    if to_date < from_date:
-        raise HTTPException(status_code=400, detail="End date must be on or after start date")
-    if (to_date - from_date).days > 366:
-        raise HTTPException(status_code=400, detail="Export period cannot exceed 366 days")
-
+def build_attendance_csv(db: Session, from_date: date, to_date: date,
+                         user_id: Optional[list[str]] = None) -> str:
+    """The shift-aware attendance CSV as text. Shared by the download
+    endpoint and the Google Drive send, so both always carry the same file."""
     summary, daily = _pdf_rows(db, from_date, to_date, user_id)
     days, matrix = _attendance_matrix(summary, daily, from_date, to_date)
     output = io.StringIO()
@@ -111,11 +96,32 @@ def export_attendance(
             ])
         row.extend([f"{employee['hours']:.2f}", employee["punches"]])
         writer.writerow(row)
+    return output.getvalue()
 
-    output.seek(0)
+
+@router.get("/export")
+def export_attendance(
+    from_date: date = Query(...),
+    to_date: date = Query(...),
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+    user_id: Optional[list[str]] = Query(None),
+):
+    """Export shift-aware daily attendance and employee totals as CSV.
+
+    Raw punches are never rewritten. Employees without an assigned schedule
+    use the shop's default rule: one operational day runs 03:00–02:59, the
+    first punch is in, the last is out, and credited time is capped at 13h.
+    """
+    if to_date < from_date:
+        raise HTTPException(status_code=400, detail="End date must be on or after start date")
+    if (to_date - from_date).days > 366:
+        raise HTTPException(status_code=400, detail="Export period cannot exceed 366 days")
+
+    content = build_attendance_csv(db, from_date, to_date, user_id)
     filename = f"attendance-{from_date.isoformat()}-to-{to_date.isoformat()}.csv"
     return StreamingResponse(
-        iter([output.getvalue()]),
+        iter([content]),
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

@@ -460,6 +460,31 @@ class HrmIntegration(Base):
     last_error = Column(String(1000), nullable=True)
 
 
+class DriveIntegration(Base):
+    """Single-row table — Google Drive service account, target and last send.
+
+    sa_key is the service-account key JSON. It is write-only from the API's
+    point of view: never serialised back out, logged or put in audit detail.
+    """
+    __tablename__ = "drive_integration"
+
+    id = Column(Integer, primary_key=True, default=1)
+    # Service account (admin uploads the key JSON in Settings)
+    sa_key = Column(Text, nullable=True)
+    sa_email = Column(String(320), nullable=True)      # client_email: safe to show
+    key_uploaded_at = Column(DateTime, nullable=True)
+    key_uploaded_by = Column(String(150), nullable=True)
+    # Target: a shared drive, or a folder inside one (admin sets it)
+    folder_id = Column(String(200), nullable=True)
+    folder_title = Column(String(300), nullable=True)  # name Google reported on last check
+    # Last send
+    last_send_at = Column(DateTime, nullable=True)
+    last_send_ok = Column(Boolean, nullable=True)
+    last_send_file = Column(String(200), nullable=True)
+    last_send_by = Column(String(150), nullable=True)
+    last_error = Column(String(1000), nullable=True)
+
+
 class AdmsPairing(Base):
     """Single-row table — the time-boxed window during which an unrecognised
     serial is filed for approval instead of being refused outright.
