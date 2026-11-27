@@ -1,12 +1,16 @@
-"""Google Drive send: sign-in, create-vs-replace, staff errors, roles, audit."""
+"""Google Drive send: service-account key, shared-drive target, create-vs-replace,
+staff-facing errors, roles and audit."""
 
+import base64
 import json
 import unittest
 from datetime import datetime
 from unittest.mock import patch
 
 import httpx
-from fastapi import FastAPI
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -20,62 +24,67 @@ from app.services import drive
 
 ADMIN = User(id=1, username="boss", role="admin", password_hash="x")
 VIEWER = User(id=2, username="cashier", role="viewer", password_hash="x")
+SA_EMAIL = "factorpunch@rasheed-test.iam.gserviceaccount.com"
+SHARED = "0AbCdEfGhIjKlMnOpQ"     # a shared drive's root ID
+MY_DRIVE = "1MyDriveFolderXYZ123"  # a folder in someone's My Drive
+
+_PEM = rsa.generate_private_key(public_exponent=65537, key_size=2048).private_bytes(
+    serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+    serialization.NoEncryption()).decode()
+KEY = {
+    "type": "service_account", "project_id": "rasheed-test",
+    "private_key_id": "abc123", "private_key": _PEM, "client_email": SA_EMAIL,
+    "client_id": "1", "token_uri": "https://oauth2.googleapis.com/token",
+}
+
+
+def _claims(assertion: str) -> dict:
+    payload = assertion.split(".")[1]
+    return json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
 
 
 class FakeGoogle:
-    """In-memory stand-in for Google's OAuth and Drive endpoints."""
+    """In-memory stand-in for Google's token and Drive endpoints."""
 
     def __init__(self):
-        self.files = {}          # id -> {"name", "parents", "content", "mime"}
+        self.files = {
+            SHARED: {"name": "Rasheed Restaurant", "mime": drive.FOLDER_MIME, "driveId": SHARED},
+            MY_DRIVE: {"name": "My stuff", "mime": drive.FOLDER_MIME},
+        }
         self.calls = []
-        self.token_status = "ok"
-        self.device_status = "pending"
+        self.key_revoked = False
         self.upload_status = 200
         self.offline = False
         self._next = 0
-
-    def _id(self):
-        self._next += 1
-        return f"id{self._next}"
 
     def __call__(self, req: httpx.Request) -> httpx.Response:
         if self.offline:
             raise httpx.ConnectError("offline", request=req)
         url = str(req.url)
         self.calls.append((req.method, url))
-        if url.startswith(drive.DEVICE_CODE_URL):
-            return httpx.Response(200, json={
-                "device_code": "DEV", "user_code": "ABCD-EFGH",
-                "verification_url": "https://www.google.com/device",
-                "expires_in": 1800, "interval": 5})
         if url.startswith(drive.TOKEN_URL):
             body = dict(httpx.QueryParams(req.content.decode()))
-            if body["grant_type"] == drive.DEVICE_GRANT:
-                if self.device_status == "pending":
-                    return httpx.Response(428, json={"error": "authorization_pending"})
-                if self.device_status == "denied":
-                    return httpx.Response(403, json={"error": "access_denied"})
-                return httpx.Response(200, json={"access_token": "AT", "refresh_token": "RT"})
-            if self.token_status == "revoked":
+            assert body["grant_type"] == drive.JWT_GRANT
+            claims = _claims(body["assertion"])
+            assert claims["iss"] == SA_EMAIL and claims["scope"] == drive.SCOPE
+            if self.key_revoked:
                 return httpx.Response(400, json={"error": "invalid_grant"})
             return httpx.Response(200, json={"access_token": "AT", "expires_in": 3599})
-        if url.startswith(drive.REVOKE_URL):
-            return httpx.Response(200)
         assert req.headers.get("authorization") == "Bearer AT"
+        # Every Drive call must opt in to shared drives.
+        assert req.url.params.get("supportsAllDrives") == "true", url
         if req.method == "GET" and url.startswith(drive.FILES + "/"):
             fid = req.url.path.rsplit("/", 1)[1]
-            if fid in self.files:
-                return httpx.Response(200, json={"id": fid, "trashed": False})
-            return httpx.Response(404, json={})
-        if req.method == "POST" and url.startswith(drive.FILES):
-            meta = json.loads(req.content)
-            fid = self._id()
-            self.files[fid] = {"name": meta["name"], "parents": [], "mime": meta["mimeType"]}
-            return httpx.Response(200, json={"id": fid})
+            meta = self.files.get(fid)
+            if not meta:
+                return httpx.Response(404, json={})
+            return httpx.Response(200, json={"id": fid, "name": meta["name"], "mimeType": meta["mime"],
+                                             "trashed": False, "driveId": meta.get("driveId")})
         if req.method == "GET" and url.startswith(drive.FILES):
+            assert req.url.params.get("includeItemsFromAllDrives") == "true"
             q = req.url.params["q"]
             hits = [{"id": k} for k, v in self.files.items()
-                    if f"name = '{v['name']}'" in q and any(f"'{p}' in parents" in q for p in v["parents"])]
+                    if f"name = '{v['name']}'" in q and any(f"'{p}' in parents" in q for p in v.get("parents", []))]
             return httpx.Response(200, json={"files": hits[:1]})
         if self.upload_status != 200:
             return httpx.Response(self.upload_status, json={})
@@ -84,7 +93,8 @@ class FakeGoogle:
             parts = req.content.split(f"--{boundary}".encode())
             meta = json.loads(parts[1].split(b"\r\n\r\n", 1)[1])
             content = parts[2].split(b"\r\n\r\n", 1)[1][:-2]
-            fid = self._id()
+            self._next += 1
+            fid = f"f{self._next}"
             self.files[fid] = {"name": meta["name"], "parents": meta["parents"],
                                "mime": meta["mimeType"], "content": content}
             return httpx.Response(200, json={"id": fid})
@@ -93,6 +103,9 @@ class FakeGoogle:
             self.files[fid]["content"] = req.content
             return httpx.Response(200, json={"id": fid})
         raise AssertionError(f"unexpected call {req.method} {url}")
+
+    def csvs(self):
+        return [f for f in self.files.values() if f["name"].endswith(".csv")]
 
 
 class DriveSendTests(unittest.TestCase):
@@ -116,7 +129,6 @@ class DriveSendTests(unittest.TestCase):
 
         def admin_only():
             if self.user.role != "admin":
-                from fastapi import HTTPException
                 raise HTTPException(status_code=403, detail="Admin access required")
             return self.user
 
@@ -125,14 +137,13 @@ class DriveSendTests(unittest.TestCase):
         app.dependency_overrides[require_admin] = admin_only
         self.client = TestClient(app)
 
-        patcher = patch.object(drive, "make_client",
-                               lambda: httpx.Client(transport=httpx.MockTransport(self.google)))
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        today = patch.object(drive_router, "operational_today",
-                             lambda: datetime(2026, 9, 1).date())
-        today.start()
-        self.addCleanup(today.stop)
+        for patcher in (
+            patch.object(drive, "make_client",
+                         lambda: httpx.Client(transport=httpx.MockTransport(self.google))),
+            patch.object(drive_router, "operational_today", lambda: datetime(2026, 9, 1).date()),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
         with self.Session() as db:
             db.add(Employee(user_id="1001", name="Aisha", shift_name="Morning",
@@ -153,145 +164,148 @@ class DriveSendTests(unittest.TestCase):
         self.engine.dispose()
 
     # helpers
-    def connect(self):
-        r = self.client.put("/drive", json={"client_id": "cid", "client_secret": "csecret"})
+    def set_up_drive(self, folder=f"https://drive.google.com/drive/u/0/folders/{SHARED}"):
+        r = self.client.post("/drive/key", json={"key_json": json.dumps(KEY)})
         self.assertEqual(r.status_code, 200, r.text)
-        r = self.client.post("/drive/connect")
+        r = self.client.put("/drive", json={"folder": folder})
         self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual(r.json()["pending"]["user_code"], "ABCD-EFGH")
-        self.google.device_status = "approved"
-        r = self.client.post("/drive/connect/poll")
-        self.assertEqual(r.json()["status"], "connected", r.text)
+        return r
 
     def audits(self, action):
         with self.Session() as db:
             return [a.detail for a in db.query(AuditLog).filter_by(action=action).all()]
 
-    # tests
-    def test_secrets_are_never_returned(self):
-        self.connect()
-        body = self.client.get("/drive").text
-        self.assertNotIn("csecret", body)
-        self.assertNotIn("RT", json.loads(body).values())
-        self.assertTrue(json.loads(body)["client_secret_set"])
-        for detail in self.audits("drive_config_change"):
-            self.assertNotIn("csecret", detail)
+    # key handling
+    def test_private_key_is_never_returned_or_logged(self):
+        self.set_up_drive()
+        body = self.client.get("/drive").json()
+        self.assertTrue(body["key_set"])
+        self.assertEqual(body["sa_email"], SA_EMAIL)
+        self.assertNotIn("PRIVATE KEY", json.dumps(body))
+        for action in ("drive_key_upload", "drive_config_change"):
+            for detail in self.audits(action):
+                self.assertNotIn("PRIVATE KEY", detail)
 
-    def test_poll_while_pending_then_connected(self):
-        self.client.put("/drive", json={"client_id": "cid", "client_secret": "csecret"})
-        self.client.post("/drive/connect")
-        r = self.client.post("/drive/connect/poll")
-        self.assertEqual(r.json()["status"], "pending")
-        self.assertFalse(r.json()["connected"])
-        self.google.device_status = "approved"
-        r = self.client.post("/drive/connect/poll")
-        self.assertTrue(r.json()["connected"])
-        self.assertEqual(self.audits("drive_connect"), ["Google Drive signed in"])
+    def test_rejects_files_that_are_not_service_account_keys(self):
+        for bad, words in (("not json", "valid JSON"),
+                           (json.dumps({"type": "authorized_user"}), "service-account key"),
+                           (json.dumps({**KEY, "private_key": ""}), "missing fields"),
+                           (json.dumps({**KEY, "private_key": "garbage"}), "can't be read")):
+            r = self.client.post("/drive/key", json={"key_json": bad})
+            self.assertEqual(r.status_code, 400, bad)
+            self.assertIn(words, r.json()["detail"])
+        self.assertFalse(self.client.get("/drive").json()["key_set"])
 
-    def test_declined_sign_in_gives_clear_message(self):
-        self.client.put("/drive", json={"client_id": "cid", "client_secret": "csecret"})
-        self.client.post("/drive/connect")
-        self.google.device_status = "denied"
-        r = self.client.post("/drive/connect/poll")
+    def test_folder_accepts_link_or_id_and_rejects_junk(self):
+        self.assertEqual(drive_router.parse_folder(f"https://drive.google.com/drive/folders/{SHARED}?usp=x"), SHARED)
+        self.assertEqual(drive_router.parse_folder(f"  {SHARED} "), SHARED)
+        self.assertIsNone(drive_router.parse_folder("https://example.com/hello world"))
+        r = self.client.put("/drive", json={"folder": "nope"})
         self.assertEqual(r.status_code, 400)
-        self.assertIn("declined", r.json()["detail"])
 
-    def test_first_send_creates_folder_and_file(self):
-        self.connect()
+    def test_remove_key_turns_sending_off(self):
+        self.set_up_drive()
+        r = self.client.delete("/drive/key")
+        self.assertFalse(r.json()["ready"])
+        with self.Session() as db:
+            self.assertIsNone(db.query(DriveIntegration).first().sa_key)
+        self.assertEqual(self.client.post("/drive/send").status_code, 400)
+
+    # test button
+    def test_test_button_reports_shared_drive_name(self):
+        self.set_up_drive()
+        r = self.client.post("/drive/test")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["folder_title"], "Rasheed Restaurant")
+        self.assertEqual(self.google.csvs(), [])
+
+    def test_my_drive_folder_is_refused(self):
+        self.set_up_drive(folder=MY_DRIVE)
+        r = self.client.post("/drive/send")
+        self.assertEqual(r.status_code, 502)
+        self.assertIn("not a shared drive", r.json()["detail"])
+        self.assertEqual(self.google.csvs(), [])
+
+    def test_service_account_not_a_member_gets_clear_message(self):
+        self.set_up_drive(folder="0ZzNotSharedWithRobot")
+        r = self.client.post("/drive/test")
+        self.assertEqual(r.status_code, 502)
+        self.assertIn("Content manager", r.json()["detail"])
+
+    # sending
+    def test_first_send_creates_file_in_shared_drive(self):
+        self.set_up_drive()
         r = self.client.post("/drive/send")
         self.assertEqual(r.status_code, 200, r.text)
         self.assertFalse(r.json()["replaced"])
         self.assertTrue(r.json()["last_send_ok"])
-        names = sorted(f["name"] for f in self.google.files.values())
-        self.assertEqual(names, ["FactorPunch Attendance", "attendance-2026-09-01.csv"])
-        csv_file = next(f for f in self.google.files.values() if f["name"].endswith(".csv"))
+        [csv_file] = self.google.csvs()
+        self.assertEqual(csv_file["name"], "attendance-2026-09-01.csv")
+        self.assertEqual(csv_file["parents"], [SHARED])
         self.assertIn(b"Aisha", csv_file["content"])
         self.assertIn(b"01 Sep 2026 Punch In", csv_file["content"])
+        self.assertIn("Rasheed Restaurant", self.audits("drive_send")[0])
 
     def test_same_day_resend_replaces_instead_of_duplicating(self):
-        self.connect()
+        self.set_up_drive()
         self.client.post("/drive/send")
         r = self.client.post("/drive/send")
         self.assertTrue(r.json()["replaced"])
-        csvs = [f for f in self.google.files.values() if f["name"].endswith(".csv")]
-        self.assertEqual(len(csvs), 1)
-        folders = [f for f in self.google.files.values() if f["mime"] == drive.FOLDER_MIME]
-        self.assertEqual(len(folders), 1)
+        self.assertEqual(len(self.google.csvs()), 1)
         self.assertEqual(len(self.audits("drive_send")), 2)
         self.assertIn("replaced", self.audits("drive_send")[1])
 
     def test_viewer_can_send_but_not_configure(self):
-        self.connect()
+        self.set_up_drive()
         self.user = VIEWER
         r = self.client.post("/drive/send")
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.json()["last_send_by"], "cashier")
-        self.assertNotIn("client_id", r.json())
-        self.assertEqual(self.client.put("/drive", json={"folder_name": "x"}).status_code, 403)
-        self.assertEqual(self.client.post("/drive/connect").status_code, 403)
-        self.assertEqual(self.client.post("/drive/disconnect").status_code, 403)
+        self.assertNotIn("sa_email", r.json())
+        self.assertEqual(self.client.put("/drive", json={"folder": SHARED}).status_code, 403)
+        self.assertEqual(self.client.post("/drive/key", json={"key_json": "{}"}).status_code, 403)
+        self.assertEqual(self.client.delete("/drive/key").status_code, 403)
+        self.assertEqual(self.client.post("/drive/test").status_code, 403)
 
     def test_send_before_setup_says_ask_an_admin(self):
         r = self.client.post("/drive/send")
         self.assertEqual(r.status_code, 400)
         self.assertIn("Ask an admin", r.json()["detail"])
 
-    def test_revoked_sign_in_is_reported_and_stored(self):
-        self.connect()
-        self.google.token_status = "revoked"
+    def test_revoked_key_is_reported_and_stored(self):
+        self.set_up_drive()
+        self.google.key_revoked = True
         r = self.client.post("/drive/send")
         self.assertEqual(r.status_code, 502)
-        self.assertIn("reconnect", r.json()["detail"])
+        self.assertIn("new key", r.json()["detail"])
         status = self.client.get("/drive").json()
         self.assertFalse(status["last_send_ok"])
-        self.assertIn("reconnect", status["last_error"])
+        self.assertIn("new key", status["last_error"])
         self.assertTrue(self.audits("drive_send")[0].startswith("failed:"))
 
     def test_offline_gives_internet_message(self):
-        self.connect()
+        self.set_up_drive()
         self.google.offline = True
         r = self.client.post("/drive/send")
         self.assertEqual(r.status_code, 502)
         self.assertIn("internet connection", r.json()["detail"])
 
-    def test_deleted_folder_is_recreated(self):
-        self.connect()
-        self.client.post("/drive/send")
-        self.google.files.clear()
-        r = self.client.post("/drive/send")
-        self.assertEqual(r.status_code, 200, r.text)
-        self.assertFalse(r.json()["replaced"])
-        self.assertEqual(len(self.google.files), 2)
-
     def test_forbidden_upload_message(self):
-        self.connect()
+        self.set_up_drive()
         self.google.upload_status = 403
         r = self.client.post("/drive/send")
         self.assertEqual(r.status_code, 502)
-        self.assertIn("refused", r.json()["detail"])
+        self.assertIn("Content manager", r.json()["detail"])
 
     def test_future_day_rejected(self):
-        self.connect()
+        self.set_up_drive()
         r = self.client.post("/drive/send", params={"day": "2026-09-02"})
         self.assertEqual(r.status_code, 400)
 
     def test_past_day_uses_that_date_in_filename(self):
-        self.connect()
+        self.set_up_drive()
         r = self.client.post("/drive/send", params={"day": "2026-08-31"})
         self.assertEqual(r.json()["last_send_file"], "attendance-2026-08-31.csv")
-
-    def test_changing_client_id_drops_old_sign_in(self):
-        self.connect()
-        r = self.client.put("/drive", json={"client_id": "other"})
-        self.assertFalse(r.json()["connected"])
-
-    def test_disconnect_revokes_and_clears(self):
-        self.connect()
-        r = self.client.post("/drive/disconnect")
-        self.assertFalse(r.json()["connected"])
-        self.assertTrue(any(u.startswith(drive.REVOKE_URL) for _, u in self.google.calls))
-        with self.Session() as db:
-            self.assertIsNone(db.query(DriveIntegration).first().refresh_token)
 
 
 if __name__ == "__main__":

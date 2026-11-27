@@ -18,7 +18,7 @@ function formatWhen(value) {
 }
 
 // The button staff press once a day. Sends the shift-aware CSV for one
-// operational day to the Google Drive folder an admin connected in Settings.
+// operational day to the restaurant's Google shared drive, set up by an admin in Settings.
 export default function SendToDriveCard() {
   const [status, setStatus] = useState(null)
   const [day, setDay] = useState('')
@@ -43,8 +43,8 @@ export default function SendToDriveCard() {
       setMessage({
         type: 'success',
         text: data.replaced
-          ? `Sent. ${data.last_send_file} was updated in Google Drive.`
-          : `Sent. ${data.last_send_file} was saved to Google Drive.`,
+          ? `Sent. ${data.last_send_file} was updated in the shared drive.`
+          : `Sent. ${data.last_send_file} was saved to the shared drive.`,
       })
     } catch (err) {
       setMessage({ type: 'error', text: err.message })
@@ -60,11 +60,11 @@ export default function SendToDriveCard() {
     <div className="bg-white rounded-xl border border-gray-200 px-5 py-4 mb-6" data-testid="send-to-drive">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <p className="font-medium text-gray-900">Send attendance to Google Drive</p>
+          <p className="font-medium text-gray-900">Send attendance to the shared drive</p>
           <p className="text-xs text-gray-400 mt-0.5">
-            {status.connected
-              ? `Saves attendance-${day || status.today}.csv to the "${status.folder_name}" folder. Sending again the same day replaces the file.`
-              : "Google Drive isn't set up yet. Ask an admin to connect it in Settings."}
+            {status.ready
+              ? `Saves attendance-${day || status.today}.csv to ${status.folder_title ? `"${status.folder_title}"` : 'the shared drive'}. Sending again the same day replaces the file.`
+              : "Google Drive isn't set up yet. Ask an admin to finish it in Settings."}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -78,7 +78,7 @@ export default function SendToDriveCard() {
           />
           <button
             onClick={handleSend}
-            disabled={sending || !status.connected || !day}
+            disabled={sending || !status.ready || !day}
             className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
           >
             {sending ? 'Sending…' : `Send ${day === status.today ? "today's" : formatDay(day)} attendance`}

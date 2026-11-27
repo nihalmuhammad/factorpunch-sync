@@ -1,11 +1,13 @@
-"""Send the daily attendance CSV to Google Drive.
+"""Send the daily attendance CSV to the restaurant's Google shared drive.
 
-Any signed-in operator (admin or viewer) can press Send; only admins can sign
-in to Google, change the folder or disconnect. See app/services/drive.py for
-why sign-in is a device flow and why the app owns its folder.
+Any signed-in operator (admin or viewer) can press Send; only admins can
+upload the service-account key, set the shared-drive folder or run a test.
+See app/services/drive.py for why this is a service account and a shared drive.
 """
 
+import json
 import logging
+import re
 import threading
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
@@ -36,13 +38,27 @@ _send_lock = threading.Lock()
 # 01:00 "today" still means yesterday's trading day.
 _DAY_START_HOURS = 3
 
-MSG_NOT_SET_UP = "Google Drive isn't set up yet. Ask an admin to connect it in Settings."
+MSG_NOT_SET_UP = "Google Drive isn't set up yet. Ask an admin to finish it in Settings."
+
+_DRIVE_ID = re.compile(r"^[A-Za-z0-9_-]{10,200}$")
 
 
 class DriveConfigUpdate(BaseModel):
-    client_id: Optional[str] = Field(None, max_length=300)
-    client_secret: Optional[str] = Field(None, max_length=300)
-    folder_name: Optional[str] = Field(None, min_length=1, max_length=200)
+    # A shared drive ID, a folder ID inside it, or a pasted Drive link.
+    folder: str = Field(..., max_length=500)
+
+
+class DriveKeyUpload(BaseModel):
+    # The service-account key file's text. Real keys are ~2.4 KB.
+    key_json: str = Field(..., max_length=20000)
+
+
+def parse_folder(value: str) -> Optional[str]:
+    """Accept a raw ID or a Drive link (…/folders/<id>, …/drive/u/0/folders/<id>)."""
+    value = (value or "").strip()
+    match = re.search(r"/folders/([A-Za-z0-9_-]+)", value) or re.search(r"[?&]id=([A-Za-z0-9_-]+)", value)
+    candidate = match.group(1) if match else value
+    return candidate if _DRIVE_ID.match(candidate) else None
 
 
 def _now() -> datetime:
@@ -57,38 +73,21 @@ def operational_today() -> date:
 def _get_or_create(db: Session) -> DriveIntegration:
     row = db.query(DriveIntegration).filter_by(id=1).first()
     if not row:
-        row = DriveIntegration(id=1, folder_name="FactorPunch Attendance")
+        row = DriveIntegration(id=1)
         db.add(row)
         db.commit()
         db.refresh(row)
     return row
 
 
-def _pending(row: DriveIntegration) -> Optional[dict]:
-    if not row.pending_device_code or not row.pending_expires_at:
-        return None
-    if row.pending_expires_at <= _now():
-        return None
-    return {
-        "user_code": row.pending_user_code,
-        "verification_url": row.pending_verification_url,
-        "expires_at": row.pending_expires_at,
-        "interval": row.pending_interval or 5,
-    }
-
-
-def _clear_pending(row: DriveIntegration) -> None:
-    row.pending_device_code = None
-    row.pending_user_code = None
-    row.pending_verification_url = None
-    row.pending_expires_at = None
-    row.pending_interval = None
+def _ready(row: DriveIntegration) -> bool:
+    return bool(row.sa_key and row.folder_id)
 
 
 def _serialize(row: DriveIntegration, user: User) -> dict:
     data = {
-        "connected": bool(row.refresh_token),
-        "folder_name": row.folder_name,
+        "ready": _ready(row),
+        "folder_title": row.folder_title,
         "today": operational_today().isoformat(),
         "last_send_at": row.last_send_at,
         "last_send_ok": row.last_send_ok,
@@ -98,11 +97,11 @@ def _serialize(row: DriveIntegration, user: User) -> dict:
     }
     if user.role == "admin":
         data.update({
-            "client_id": row.client_id,
-            "client_secret_set": bool(row.client_secret),
-            "connected_at": row.connected_at,
-            "connected_by": row.connected_by,
-            "pending": _pending(row),
+            "key_set": bool(row.sa_key),
+            "sa_email": row.sa_email,
+            "key_uploaded_at": row.key_uploaded_at,
+            "key_uploaded_by": row.key_uploaded_by,
+            "folder_id": row.folder_id,
         })
     return data
 
@@ -113,118 +112,77 @@ def get_status(db: Session = Depends(get_db), user: User = Depends(require_auth)
 
 
 @router.put("")
-def update_config(payload: DriveConfigUpdate, request: Request,
-                  db: Session = Depends(get_db), admin: User = Depends(require_admin)):
+def set_folder(payload: DriveConfigUpdate, request: Request,
+               db: Session = Depends(get_db), admin: User = Depends(require_admin)):
     row = _get_or_create(db)
-    updates = payload.model_dump(exclude_unset=True)
-    # Write-only secret: blank means "leave it", never "erase it".
-    if not updates.get("client_secret"):
-        updates.pop("client_secret", None)
-    if "client_id" in updates:
-        updates["client_id"] = (updates["client_id"] or "").strip() or None
-    if "folder_name" in updates:
-        updates["folder_name"] = updates["folder_name"].strip()
-        if not updates["folder_name"]:
-            raise HTTPException(status_code=400, detail="Folder name cannot be empty")
-        if updates["folder_name"] != row.folder_name:
-            row.folder_id = None  # next send creates the newly named folder
-    credentials_changed = ("client_id" in updates and updates["client_id"] != row.client_id) \
-        or "client_secret" in updates
-    for field, value in updates.items():
-        setattr(row, field, value)
-    if credentials_changed and row.refresh_token:
-        # A grant belongs to one OAuth client; it can't be reused with another.
-        row.refresh_token = None
-        row.folder_id = None
-        row.connected_at = None
-        row.connected_by = None
-    db.commit()
-    db.refresh(row)
-    if updates:
-        secret = "client_secret" in updates
+    folder_id = parse_folder(payload.folder)
+    if not folder_id:
+        raise HTTPException(status_code=400, detail=(
+            "That doesn't look like a Google Drive folder. Open the shared drive in your browser "
+            "and paste the address bar link, or the folder ID."))
+    if folder_id != row.folder_id:
+        row.folder_id = folder_id
+        row.folder_title = None
+        db.commit()
         audit.record(db, admin.username, "drive_config_change", ip=client_ip(request),
-                     detail=f"fields changed: {', '.join(sorted(updates))}"
-                     + (" (secret value not logged)" if secret else ""))
-    return _serialize(row, admin)
-
-
-@router.post("/connect")
-def start_connect(request: Request, db: Session = Depends(get_db),
-                  admin: User = Depends(require_admin)):
-    row = _get_or_create(db)
-    if not row.client_id or not row.client_secret:
-        raise HTTPException(status_code=400,
-                            detail="Save the OAuth client ID and secret before connecting.")
-    try:
-        with drive.make_client() as client:
-            flow = drive.start_device_flow(client, row.client_id)
-    except DriveError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
-    row.pending_device_code = flow["device_code"]
-    row.pending_user_code = flow["user_code"]
-    row.pending_verification_url = flow.get("verification_url") or flow.get("verification_uri")
-    row.pending_expires_at = _now() + timedelta(seconds=int(flow.get("expires_in", 1800)))
-    row.pending_interval = int(flow.get("interval", 5))
-    db.commit()
+                     detail=f"shared drive folder set to {folder_id}")
     db.refresh(row)
     return _serialize(row, admin)
 
 
-@router.post("/connect/poll")
-def poll_connect(request: Request, db: Session = Depends(get_db),
-                 admin: User = Depends(require_admin)):
-    row = _get_or_create(db)
-    if not _pending(row):
-        _clear_pending(row)
-        db.commit()
-        raise HTTPException(status_code=400,
-                            detail="No sign-in in progress, or the code expired. Start again.")
+@router.post("/key")
+def upload_key(payload: DriveKeyUpload, request: Request,
+               db: Session = Depends(get_db), admin: User = Depends(require_admin)):
     try:
-        with drive.make_client() as client:
-            tokens = drive.poll_device_flow(client, row.client_id, row.client_secret,
-                                            row.pending_device_code)
-    except DriveError as exc:
-        _clear_pending(row)
-        db.commit()
+        info = drive.parse_key(payload.key_json)
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    if tokens is None:
-        return {**_serialize(row, admin), "status": "pending"}
-    if not tokens.get("refresh_token"):
-        _clear_pending(row)
-        db.commit()
-        raise HTTPException(status_code=400,
-                            detail="Google did not return a long-lived sign-in. Start again.")
-    row.refresh_token = tokens["refresh_token"]
-    row.connected_at = _now()
-    row.connected_by = admin.username
-    row.folder_id = None
-    row.last_error = None
-    _clear_pending(row)
+    row = _get_or_create(db)
+    # Re-serialised from the parsed dict so stray text never lands in the DB.
+    row.sa_key = json.dumps(info)
+    row.sa_email = info["client_email"]
+    row.key_uploaded_at = _now()
+    row.key_uploaded_by = admin.username
     db.commit()
     db.refresh(row)
-    audit.record(db, admin.username, "drive_connect", ip=client_ip(request),
-                 detail="Google Drive signed in")
-    return {**_serialize(row, admin), "status": "connected"}
+    audit.record(db, admin.username, "drive_key_upload", ip=client_ip(request),
+                 detail=f"service account {row.sa_email} (key not logged)")
+    return _serialize(row, admin)
 
 
-@router.post("/disconnect")
-def disconnect(request: Request, db: Session = Depends(get_db),
+@router.delete("/key")
+def remove_key(request: Request, db: Session = Depends(get_db),
                admin: User = Depends(require_admin)):
     row = _get_or_create(db)
-    token = row.refresh_token
-    row.refresh_token = None
-    row.folder_id = None
-    row.connected_at = None
-    row.connected_by = None
-    _clear_pending(row)
+    had_key = bool(row.sa_key)
+    row.sa_key = None
+    row.sa_email = None
+    row.key_uploaded_at = None
+    row.key_uploaded_by = None
     db.commit()
     db.refresh(row)
-    if token:
-        with drive.make_client() as client:
-            drive.revoke(client, token)
-        audit.record(db, admin.username, "drive_disconnect", ip=client_ip(request),
-                     detail="Google Drive signed out")
+    if had_key:
+        audit.record(db, admin.username, "drive_key_remove", ip=client_ip(request),
+                     detail="service-account key removed")
     return _serialize(row, admin)
+
+
+@router.post("/test")
+def test_connection(db: Session = Depends(get_db), admin: User = Depends(require_admin)):
+    """Check the key works and the shared-drive folder is reachable, without uploading."""
+    row = _get_or_create(db)
+    if not _ready(row):
+        raise HTTPException(status_code=400,
+                            detail="Upload the key and set the shared-drive folder first.")
+    try:
+        with drive.make_client() as client:
+            token = drive.access_token(client, json.loads(row.sa_key))
+            row.folder_title = drive.check_target(client, token, row.folder_id)
+    except DriveError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    db.commit()
+    db.refresh(row)
+    return {**_serialize(row, admin), "test_ok": True}
 
 
 @router.post("/send")
@@ -242,15 +200,14 @@ def send(request: Request, day: Optional[date] = Query(None),
         raise HTTPException(status_code=409, detail="Another send is in progress. Try again in a minute.")
     try:
         row = _get_or_create(db)
-        if not (row.refresh_token and row.client_id and row.client_secret):
+        if not _ready(row):
             raise HTTPException(status_code=400, detail=MSG_NOT_SET_UP)
 
         content = build_attendance_csv(db, day, day).encode("utf-8")
         try:
             with drive.make_client() as client:
-                token = drive.access_token(client, row.client_id, row.client_secret,
-                                           row.refresh_token)
-                row.folder_id = drive.ensure_folder(client, token, row.folder_id, row.folder_name)
+                token = drive.access_token(client, json.loads(row.sa_key))
+                row.folder_title = drive.check_target(client, token, row.folder_id)
                 result = drive.upload_csv(client, token, row.folder_id, filename, content)
         except DriveError as exc:
             message = str(exc)
@@ -273,7 +230,7 @@ def send(request: Request, day: Optional[date] = Query(None),
         db.refresh(row)
         action = "replaced" if result["replaced"] else "created"
         audit.record(db, user.username, "drive_send", target=filename, ip=ip,
-                     detail=f"{action} in Drive folder '{row.folder_name}'")
+                     detail=f"{action} in shared drive folder '{row.folder_title}'")
         return {**_serialize(row, user), "replaced": result["replaced"]}
     finally:
         _send_lock.release()

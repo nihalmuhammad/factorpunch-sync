@@ -461,29 +461,22 @@ class HrmIntegration(Base):
 
 
 class DriveIntegration(Base):
-    """Single-row table — Google Drive sign-in, target folder and last send.
+    """Single-row table — Google Drive service account, target and last send.
 
-    client_secret and refresh_token are write-only from the API's point of
-    view: they are never serialised back out, logged or put in audit detail.
+    sa_key is the service-account key JSON. It is write-only from the API's
+    point of view: never serialised back out, logged or put in audit detail.
     """
     __tablename__ = "drive_integration"
 
     id = Column(Integer, primary_key=True, default=1)
-    # Config (admin, from Settings)
-    client_id = Column(String(300), nullable=True)
-    client_secret = Column(String(300), nullable=True)
-    folder_name = Column(String(200), nullable=False, default="FactorPunch Attendance")
-    # Sign-in state
-    refresh_token = Column(String(1000), nullable=True)
-    connected_at = Column(DateTime, nullable=True)
-    connected_by = Column(String(150), nullable=True)
-    folder_id = Column(String(200), nullable=True)     # created by the app (drive.file scope)
-    # An in-progress device-flow sign-in
-    pending_device_code = Column(String(500), nullable=True)
-    pending_user_code = Column(String(50), nullable=True)
-    pending_verification_url = Column(String(300), nullable=True)
-    pending_expires_at = Column(DateTime, nullable=True)
-    pending_interval = Column(Integer, nullable=True)
+    # Service account (admin uploads the key JSON in Settings)
+    sa_key = Column(Text, nullable=True)
+    sa_email = Column(String(320), nullable=True)      # client_email: safe to show
+    key_uploaded_at = Column(DateTime, nullable=True)
+    key_uploaded_by = Column(String(150), nullable=True)
+    # Target: a shared drive, or a folder inside one (admin sets it)
+    folder_id = Column(String(200), nullable=True)
+    folder_title = Column(String(300), nullable=True)  # name Google reported on last check
     # Last send
     last_send_at = Column(DateTime, nullable=True)
     last_send_ok = Column(Boolean, nullable=True)
