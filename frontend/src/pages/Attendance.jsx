@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { api } from '../api'
+import SendToDriveCard from '../components/SendToDriveCard'
 
 const PAGE_SIZE = 50
 
@@ -190,6 +191,8 @@ export default function Attendance() {
           </button>
         </div>
       </div>
+
+      <SendToDriveCard />
 
       {/* Filters */}
       <div className="bg-white rounded-xl border border-gray-200 p-4 mb-4 grid grid-cols-2 md:grid-cols-4 gap-3">

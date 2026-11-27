@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { api } from '../api'
 import { useAuth } from '../auth'
+import DriveSettingsCard from '../components/DriveSettingsCard'
 
 function Field({ label, hint, children }) {
   return (
@@ -500,6 +501,8 @@ export default function Settings() {
           </div>
         )}
       </div>
+
+      {user?.role === 'admin' && <DriveSettingsCard onToast={showToast} />}
 
       {user?.role === 'admin' && <AuditLog />}
 

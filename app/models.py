@@ -460,6 +460,38 @@ class HrmIntegration(Base):
     last_error = Column(String(1000), nullable=True)
 
 
+class DriveIntegration(Base):
+    """Single-row table — Google Drive sign-in, target folder and last send.
+
+    client_secret and refresh_token are write-only from the API's point of
+    view: they are never serialised back out, logged or put in audit detail.
+    """
+    __tablename__ = "drive_integration"
+
+    id = Column(Integer, primary_key=True, default=1)
+    # Config (admin, from Settings)
+    client_id = Column(String(300), nullable=True)
+    client_secret = Column(String(300), nullable=True)
+    folder_name = Column(String(200), nullable=False, default="FactorPunch Attendance")
+    # Sign-in state
+    refresh_token = Column(String(1000), nullable=True)
+    connected_at = Column(DateTime, nullable=True)
+    connected_by = Column(String(150), nullable=True)
+    folder_id = Column(String(200), nullable=True)     # created by the app (drive.file scope)
+    # An in-progress device-flow sign-in
+    pending_device_code = Column(String(500), nullable=True)
+    pending_user_code = Column(String(50), nullable=True)
+    pending_verification_url = Column(String(300), nullable=True)
+    pending_expires_at = Column(DateTime, nullable=True)
+    pending_interval = Column(Integer, nullable=True)
+    # Last send
+    last_send_at = Column(DateTime, nullable=True)
+    last_send_ok = Column(Boolean, nullable=True)
+    last_send_file = Column(String(200), nullable=True)
+    last_send_by = Column(String(150), nullable=True)
+    last_error = Column(String(1000), nullable=True)
+
+
 class AdmsPairing(Base):
     """Single-row table — the time-boxed window during which an unrecognised
     serial is filed for approval instead of being refused outright.

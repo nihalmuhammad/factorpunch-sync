@@ -54,6 +54,16 @@ export const api = {
     update: (data) => request('PUT', '/hrm-sync', data),
     run: () => request('POST', '/hrm-sync/run'),
   },
+  // Daily attendance CSV to Google Drive. Any signed-in user may send; the
+  // rest is admin-only on the server.
+  drive: {
+    status: () => request('GET', '/drive'),
+    update: (data) => request('PUT', '/drive', data),
+    connect: () => request('POST', '/drive/connect'),
+    poll: () => request('POST', '/drive/connect/poll'),
+    disconnect: () => request('POST', '/drive/disconnect'),
+    send: (day) => request('POST', `/drive/send${day ? `?day=${encodeURIComponent(day)}` : ''}`),
+  },
   attendance: {
     list: (params = {}) => {
       const q = new URLSearchParams()
