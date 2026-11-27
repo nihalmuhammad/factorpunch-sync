@@ -1,6 +1,5 @@
 """Google Drive send: sign-in, create-vs-replace, staff errors, roles, audit."""
 
-import base64
 import json
 import unittest
 from datetime import datetime
@@ -13,7 +12,6 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app import config
 from app.database import Base, get_db
 from app.deps import require_admin, require_auth
 from app.models import AttendanceLog, AuditLog, DriveIntegration, Employee, User
@@ -22,13 +20,6 @@ from app.services import drive
 
 ADMIN = User(id=1, username="boss", role="admin", password_hash="x")
 VIEWER = User(id=2, username="cashier", role="viewer", password_hash="x")
-ALLOWED = "owner@restaurant.example"
-
-
-def id_token(email, verified=True):
-    claims = base64.urlsafe_b64encode(json.dumps(
-        {"email": email, "email_verified": verified}).encode()).decode().rstrip("=")
-    return f"header.{claims}.signature"
 
 
 class FakeGoogle:
@@ -39,8 +30,6 @@ class FakeGoogle:
         self.calls = []
         self.token_status = "ok"
         self.device_status = "pending"
-        self.email = ALLOWED
-        self.email_verified = True
         self.upload_status = 200
         self.offline = False
         self._next = 0
@@ -66,9 +55,7 @@ class FakeGoogle:
                     return httpx.Response(428, json={"error": "authorization_pending"})
                 if self.device_status == "denied":
                     return httpx.Response(403, json={"error": "access_denied"})
-                return httpx.Response(200, json={
-                    "access_token": "AT", "refresh_token": "RT",
-                    "id_token": id_token(self.email, self.email_verified)})
+                return httpx.Response(200, json={"access_token": "AT", "refresh_token": "RT"})
             if self.token_status == "revoked":
                 return httpx.Response(400, json={"error": "invalid_grant"})
             return httpx.Response(200, json={"access_token": "AT", "expires_in": 3599})
@@ -142,9 +129,6 @@ class DriveSendTests(unittest.TestCase):
                                lambda: httpx.Client(transport=httpx.MockTransport(self.google)))
         patcher.start()
         self.addCleanup(patcher.stop)
-        allowed = patch.object(config, "DRIVE_ALLOWED_ACCOUNTS", [ALLOWED])
-        allowed.start()
-        self.addCleanup(allowed.stop)
         today = patch.object(drive_router, "operational_today",
                              lambda: datetime(2026, 9, 1).date())
         today.start()
@@ -202,8 +186,7 @@ class DriveSendTests(unittest.TestCase):
         self.google.device_status = "approved"
         r = self.client.post("/drive/connect/poll")
         self.assertTrue(r.json()["connected"])
-        self.assertEqual(self.audits("drive_connect"), [f"Google Drive signed in as {ALLOWED}"])
-        self.assertEqual(r.json()["connected_email"], ALLOWED)
+        self.assertEqual(self.audits("drive_connect"), ["Google Drive signed in"])
 
     def test_declined_sign_in_gives_clear_message(self):
         self.client.put("/drive", json={"client_id": "cid", "client_secret": "csecret"})
@@ -309,59 +292,6 @@ class DriveSendTests(unittest.TestCase):
         self.assertTrue(any(u.startswith(drive.REVOKE_URL) for _, u in self.google.calls))
         with self.Session() as db:
             self.assertIsNone(db.query(DriveIntegration).first().refresh_token)
-
-
-    # ── account lock ────────────────────────────────────────────────────────
-    def start_sign_in(self):
-        self.client.put("/drive", json={"client_id": "cid", "client_secret": "csecret"})
-        self.client.post("/drive/connect")
-        self.google.device_status = "approved"
-
-    def test_other_google_account_is_refused_and_revoked(self):
-        self.google.email = "someone@gmail.com"
-        self.start_sign_in()
-        r = self.client.post("/drive/connect/poll")
-        self.assertEqual(r.status_code, 403)
-        self.assertIn("someone@gmail.com", r.json()["detail"])
-        self.assertIn(ALLOWED, r.json()["detail"])
-        self.assertTrue(any(u.startswith(drive.REVOKE_URL) for _, u in self.google.calls))
-        status = self.client.get("/drive").json()
-        self.assertFalse(status["connected"])
-        self.assertIsNone(status["pending"])
-        self.assertIn("refused", self.audits("drive_connect")[0])
-
-    def test_unverified_email_is_refused(self):
-        self.google.email_verified = False
-        self.start_sign_in()
-        r = self.client.post("/drive/connect/poll")
-        self.assertEqual(r.status_code, 403)
-        self.assertFalse(self.client.get("/drive").json()["connected"])
-
-    def test_allowed_account_match_ignores_case(self):
-        self.google.email = "Owner@Restaurant.Example"
-        self.start_sign_in()
-        self.assertEqual(self.client.post("/drive/connect/poll").json()["status"], "connected")
-
-    def test_whole_domain_can_be_allowed(self):
-        self.google.email = "manager@restaurant.example"
-        with patch.object(config, "DRIVE_ALLOWED_ACCOUNTS", ["@restaurant.example"]):
-            self.start_sign_in()
-            self.assertEqual(self.client.post("/drive/connect/poll").json()["status"], "connected")
-            self.assertFalse(config.drive_account_allowed("manager@restaurant.example.evil.com"))
-
-    def test_no_allowed_account_switches_drive_off(self):
-        self.client.put("/drive", json={"client_id": "cid", "client_secret": "csecret"})
-        with patch.object(config, "DRIVE_ALLOWED_ACCOUNTS", []):
-            r = self.client.post("/drive/connect")
-            self.assertEqual(r.status_code, 400)
-            self.assertIn("DRIVE_ALLOWED_ACCOUNT", r.json()["detail"])
-
-    def test_send_blocked_if_allow_list_no_longer_matches(self):
-        self.connect()
-        with patch.object(config, "DRIVE_ALLOWED_ACCOUNTS", ["other@restaurant.example"]):
-            r = self.client.post("/drive/send")
-        self.assertEqual(r.status_code, 403)
-        self.assertEqual([f for f in self.google.files.values() if f["name"].endswith(".csv")], [])
 
 
 if __name__ == "__main__":

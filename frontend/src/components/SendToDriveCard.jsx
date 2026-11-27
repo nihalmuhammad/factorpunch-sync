@@ -63,7 +63,7 @@ export default function SendToDriveCard() {
           <p className="font-medium text-gray-900">Send attendance to Google Drive</p>
           <p className="text-xs text-gray-400 mt-0.5">
             {status.connected
-              ? `Saves attendance-${day || status.today}.csv to the "${status.folder_name}" folder in ${status.allowed_account}'s Google Drive. Sending again the same day replaces the file.`
+              ? `Saves attendance-${day || status.today}.csv to the "${status.folder_name}" folder. Sending again the same day replaces the file.`
               : "Google Drive isn't set up yet. Ask an admin to connect it in Settings."}
           </p>
         </div>
